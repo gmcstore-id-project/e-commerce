@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1781215332250,
+      "tag": "0000_youthful_piledriver",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1781215702179,
+      "tag": "0001_careful_silver_fox",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1781270604380,
+      "tag": "0002_young_sentinels",
+      "breakpoints": true
+    }
+  ]
+}
