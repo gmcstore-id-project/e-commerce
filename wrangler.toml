@@ -1,0 +1,15 @@
+name = "cws-ecommerce-api"
+main = "worker/index.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cws-db"
+database_id = "GANTI_DENGAN_ID_DARI_WRANGLER"
+
+[vars]
+NODE_ENV = "production"
+
+# Secret variables (set via: wrangler secret put SESSION_SECRET)
+# SESSION_SECRET = "..."
