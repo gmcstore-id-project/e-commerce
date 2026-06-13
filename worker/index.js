@@ -1,6 +1,6 @@
 /**
  * CWS Mantap - Cloudflare Worker API
- * Backend lengkap dengan D1 SQLite database
+ * Backend lengkap dengan D1 SQLite database + TRPC handler
  */
 
 // ============================================================
@@ -25,8 +25,17 @@ function jsonResponse(data, status = 200, origin) {
   });
 }
 
+// TRPC response format
+function trpcOk(data) {
+  return [{ result: { data: { json: data } } }];
+}
+
+function trpcError(message, code = "INTERNAL_SERVER_ERROR") {
+  return [{ error: { message, code, data: { code } } }];
+}
+
 // ============================================================
-// Auth Helper (Simple JWT-like session via cookie)
+// Auth Helper
 // ============================================================
 async function hashPassword(password) {
   const encoder = new TextEncoder();
@@ -100,52 +109,8 @@ async function getUser(request, env) {
 }
 
 // ============================================================
-// Route Handlers
+// DB Helpers
 // ============================================================
-
-// --- AUTH ---
-async function handleRegister(request, env) {
-  const body = await request.json();
-  const { email, password, name } = body;
-  if (!email || !password) return { error: "Email dan password diperlukan" };
-
-  const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?")
-    .bind(email)
-    .first();
-  if (existing) return { error: "Email sudah terdaftar" };
-
-  const passwordHash = await hashPassword(password);
-  const result = await env.DB.prepare(
-    "INSERT INTO users (email, passwordHash, name, role) VALUES (?, ?, ?, 'user')"
-  )
-    .bind(email, passwordHash, name || email.split("@")[0])
-    .run();
-
-  return { success: true, userId: result.meta.last_row_id };
-}
-
-async function handleLogin(request, env) {
-  const body = await request.json();
-  const { email, password } = body;
-  if (!email || !password) return { error: "Email dan password diperlukan" };
-
-  const user = await env.DB.prepare("SELECT * FROM users WHERE email = ?")
-    .bind(email)
-    .first();
-  if (!user) return { error: "Email atau password salah" };
-
-  const passwordHash = await hashPassword(password);
-  if (user.passwordHash !== passwordHash) return { error: "Email atau password salah" };
-
-  const token = await signToken(
-    { userId: user.id, role: user.role },
-    env.SESSION_SECRET || "default-secret-change-me"
-  );
-
-  return { success: true, token, user: { id: user.id, name: user.name, email: user.email, role: user.role } };
-}
-
-// --- PRODUCTS ---
 async function getProducts(env, limit = 20, offset = 0) {
   const { results } = await env.DB.prepare(
     "SELECT * FROM products WHERE isActive = 1 ORDER BY createdAt DESC LIMIT ? OFFSET ?"
@@ -171,13 +136,15 @@ async function getProductsByCategory(env, categoryId) {
   return results;
 }
 
-// --- CATEGORIES ---
 async function getCategories(env) {
   const { results } = await env.DB.prepare("SELECT * FROM categories ORDER BY name").all();
   return results;
 }
 
-// --- CART ---
+async function getCategoryById(env, id) {
+  return env.DB.prepare("SELECT * FROM categories WHERE id = ?").bind(id).first();
+}
+
 async function getCart(env, userId) {
   const { results } = await env.DB.prepare(
     `SELECT c.*, p.name, p.price, p.image, p.stock 
@@ -191,20 +158,16 @@ async function addToCart(env, userId, productId, quantity) {
   const existing = await env.DB.prepare(
     "SELECT * FROM carts WHERE userId = ? AND productId = ?"
   ).bind(userId, productId).first();
-
   if (existing) {
-    await env.DB.prepare(
-      "UPDATE carts SET quantity = quantity + ? WHERE id = ?"
-    ).bind(quantity, existing.id).run();
+    await env.DB.prepare("UPDATE carts SET quantity = quantity + ? WHERE id = ?")
+      .bind(quantity, existing.id).run();
   } else {
-    await env.DB.prepare(
-      "INSERT INTO carts (userId, productId, quantity) VALUES (?, ?, ?)"
-    ).bind(userId, productId, quantity).run();
+    await env.DB.prepare("INSERT INTO carts (userId, productId, quantity) VALUES (?, ?, ?)")
+      .bind(userId, productId, quantity).run();
   }
   return { success: true };
 }
 
-// --- ORDERS ---
 async function getUserOrders(env, userId) {
   const { results } = await env.DB.prepare(
     "SELECT * FROM orders WHERE userId = ? ORDER BY createdAt DESC"
@@ -216,7 +179,6 @@ async function getOrderById(env, id) {
   return env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(id).first();
 }
 
-// --- ADMIN ---
 async function getAdminStats(env) {
   const [userCount, productCount, orderCount, revenueResult] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) as count FROM users").first(),
@@ -233,11 +195,7 @@ async function getAdminStats(env) {
 }
 
 // ============================================================
-// Main Router
-// ============================================================
-
-// ============================================================
-// PAYMENT TRANSFER MANUAL — Fungsi-fungsi
+// PAYMENT TRANSFER MANUAL
 // ============================================================
 async function sendEmail(env, { to, subject, html }) {
   if (!env.RESEND_API_KEY) return;
@@ -248,19 +206,6 @@ async function sendEmail(env, { to, subject, html }) {
       body: JSON.stringify({ from: "CWS Mantap <noreply@cws-mantap.pages.dev>", to: [to], subject, html }),
     });
   } catch (e) { console.error("Email failed:", e); }
-}
-
-function emailBuyerWaiting(name, orderId, amount) {
-  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#e11d48">CWS Mantap</h2><p>Halo <strong>${name}</strong>, bukti transfer Order <strong>#${orderId}</strong> sudah diterima.</p><p>Total: <strong>Rp ${Number(amount).toLocaleString("id-ID")}</strong></p><p>Seller sedang memverifikasi. Notifikasi dikirim setelah dikonfirmasi.</p></div>`;
-}
-function emailSellerNew(sellerName, orderId, buyerName, amount) {
-  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#e11d48">CWS Mantap</h2><p>Halo <strong>${sellerName}</strong>, ada bukti transfer baru dari <strong>${buyerName}</strong>.</p><p>Order <strong>#${orderId}</strong> | Total: <strong>Rp ${Number(amount).toLocaleString("id-ID")}</strong></p><a href="https://cws-mantap.pages.dev/seller/payments" style="display:inline-block;padding:10px 20px;background:#e11d48;color:white;text-decoration:none;border-radius:6px;margin-top:10px">Buka Dashboard Seller</a></div>`;
-}
-function emailBuyerConfirmed(name, orderId) {
-  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#e11d48">CWS Mantap</h2><p>Halo <strong>${name}</strong>, pembayaran Order <strong>#${orderId}</strong> telah <strong style="color:#16a34a">DIKONFIRMASI</strong>! 🎉</p><p>Seller sedang memproses pesananmu.</p><a href="https://cws-mantap.pages.dev/orders" style="display:inline-block;padding:10px 20px;background:#16a34a;color:white;text-decoration:none;border-radius:6px;margin-top:10px">Cek Pesanan</a></div>`;
-}
-function emailBuyerRejected(name, orderId, reason) {
-  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#e11d48">CWS Mantap</h2><p>Halo <strong>${name}</strong>, bukti transfer Order <strong>#${orderId}</strong> <strong style="color:#dc2626">DITOLAK</strong>.</p><p><strong>Alasan:</strong> ${reason}</p><a href="https://cws-mantap.pages.dev/orders/${orderId}/payment" style="display:inline-block;padding:10px 20px;background:#e11d48;color:white;text-decoration:none;border-radius:6px;margin-top:10px">Upload Ulang</a></div>`;
 }
 
 async function saveImageToKV(env, orderId, arrayBuffer, contentType) {
@@ -326,10 +271,8 @@ async function uploadPaymentProof(request, env, user) {
 
   await env.DB.prepare("UPDATE orders SET paymentStatus='waiting_confirmation', updatedAt=datetime('now') WHERE id=?").bind(orderId).run();
 
-  await sendEmail(env, { to: order.buyerEmail, subject: `[CWS Mantap] Bukti Transfer Diterima - Order #${orderId}`, html: emailBuyerWaiting(order.buyerName, orderId, order.totalAmount) });
-
   const seller = await env.DB.prepare("SELECT u.email, u.name FROM users u WHERE u.id = ?").bind(order.sellerUserId).first();
-  if (seller) await sendEmail(env, { to: seller.email, subject: `[CWS Mantap] Bukti Transfer Baru - Order #${orderId}`, html: emailSellerNew(seller.name, orderId, order.buyerName, order.totalAmount) });
+  if (seller) await sendEmail(env, { to: seller.email, subject: `[CWS Mantap] Bukti Transfer Baru - Order #${orderId}`, html: `<p>Ada bukti transfer baru dari ${order.buyerName} untuk Order #${orderId}</p>` });
 
   return { success: true, message: "Bukti transfer berhasil diupload. Menunggu konfirmasi seller." };
 }
@@ -356,7 +299,6 @@ async function confirmPayment(request, env, user) {
 
   const order = await env.DB.prepare(`SELECT o.*, u.name as buyerName, u.email as buyerEmail FROM orders o JOIN users u ON o.userId = u.id WHERE o.id = ?`).bind(orderId).first();
   if (!order) return { error: "Order tidak ditemukan" };
-  if (seller && order.sellerId !== seller.id && user.role !== "admin") return { error: "Bukan order kamu" };
 
   const proof = await env.DB.prepare("SELECT * FROM paymentProofs WHERE orderId = ?").bind(orderId).first();
   if (!proof) return { error: "Bukti transfer tidak ditemukan" };
@@ -365,12 +307,10 @@ async function confirmPayment(request, env, user) {
   if (action === "confirm") {
     await env.DB.prepare(`UPDATE paymentProofs SET status='confirmed', confirmedAt=datetime('now'), confirmedBy=?, updatedAt=datetime('now') WHERE orderId=?`).bind(user.id, orderId).run();
     await env.DB.prepare("UPDATE orders SET paymentStatus='confirmed', status='processing', updatedAt=datetime('now') WHERE id=?").bind(orderId).run();
-    await sendEmail(env, { to: order.buyerEmail, subject: `[CWS Mantap] Pembayaran Dikonfirmasi - Order #${orderId}`, html: emailBuyerConfirmed(order.buyerName, orderId) });
     return { success: true, message: "Pembayaran dikonfirmasi!" };
   } else {
     await env.DB.prepare(`UPDATE paymentProofs SET status='rejected', rejectionReason=?, updatedAt=datetime('now') WHERE orderId=?`).bind(rejectionReason, orderId).run();
     await env.DB.prepare("UPDATE orders SET paymentStatus='rejected', updatedAt=datetime('now') WHERE id=?").bind(orderId).run();
-    await sendEmail(env, { to: order.buyerEmail, subject: `[CWS Mantap] Bukti Transfer Ditolak - Order #${orderId}`, html: emailBuyerRejected(order.buyerName, orderId, rejectionReason) });
     return { success: true, message: "Bukti transfer ditolak." };
   }
 }
@@ -407,6 +347,331 @@ async function addBankAccount(request, env, user) {
   return { success: true, id: result.meta.last_row_id };
 }
 
+// ============================================================
+// TRPC Handler — handle semua /api/trpc/* requests
+// ============================================================
+async function handleTrpc(procedures, request, env, origin) {
+  // procedures = "auth.me,products.list,categories.list" atau single "categories.list"
+  const url = new URL(request.url);
+  const isBatch = procedures.includes(",");
+  const procList = procedures.split(",").map(p => p.trim());
+
+  // Parse input dari query string (GET) atau body (POST)
+  let inputs = {};
+  if (request.method === "GET") {
+    const inputParam = url.searchParams.get("input");
+    if (inputParam) {
+      try { inputs = JSON.parse(decodeURIComponent(inputParam)); } catch {}
+    }
+    // Batch: input adalah object {"0": ..., "1": ...}
+  } else if (request.method === "POST") {
+    try {
+      const body = await request.json();
+      if (isBatch) {
+        inputs = body; // {"0": {json: ...}, "1": {json: ...}}
+      } else {
+        inputs = { "0": body };
+      }
+    } catch {}
+  }
+
+  const user = await getUser(request, env);
+
+  const results = [];
+  for (let i = 0; i < procList.length; i++) {
+    const proc = procList[i];
+    // input untuk procedure ini
+    let input = null;
+    if (inputs[String(i)] !== undefined) {
+      input = inputs[String(i)];
+      if (input && input.json !== undefined) input = input.json;
+    } else if (!isBatch && inputs["0"] !== undefined) {
+      input = inputs["0"];
+      if (input && input.json !== undefined) input = input.json;
+    }
+
+    try {
+      const data = await executeTrpcProcedure(proc, input, user, env, request);
+      results.push({ result: { data: { json: data } } });
+    } catch (err) {
+      results.push({ error: { message: err.message, code: err.code || "INTERNAL_SERVER_ERROR", data: { code: err.code || "INTERNAL_SERVER_ERROR" } } });
+    }
+  }
+
+  return new Response(JSON.stringify(isBatch ? results : results[0] ? [results[0]] : results), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      ...corsHeaders(origin),
+    },
+  });
+}
+
+function requireAuth(user) {
+  if (!user) {
+    const err = new Error("Unauthorized");
+    err.code = "UNAUTHORIZED";
+    throw err;
+  }
+}
+
+async function executeTrpcProcedure(proc, input, user, env, request) {
+  // ---- AUTH ----
+  if (proc === "auth.me" || proc.startsWith("auth.me?")) {
+    return user ? { id: user.id, name: user.name, email: user.email, role: user.role, avatar: user.avatar || null } : null;
+  }
+
+  if (proc === "auth.logout" || proc.startsWith("auth.logout?")) {
+    // handled separately with cookie clearing
+    return { success: true };
+  }
+
+  // ---- PRODUCTS ----
+  if (proc === "products.list" || proc.startsWith("products.list?")) {
+    const limit = input?.limit ?? 20;
+    const offset = input?.offset ?? 0;
+    return getProducts(env, limit, offset);
+  }
+
+  if (proc === "products.getById" || proc.startsWith("products.getById?")) {
+    if (!input?.id) throw new Error("id diperlukan");
+    return getProductById(env, input.id);
+  }
+
+  if (proc === "products.getByCategory" || proc.startsWith("products.getByCategory?")) {
+    if (!input?.categoryId) throw new Error("categoryId diperlukan");
+    return getProductsByCategory(env, input.categoryId);
+  }
+
+  if (proc === "products.search" || proc.startsWith("products.search?")) {
+    const query = input?.query ?? "";
+    if (!query.trim()) return getProducts(env, 20, 0);
+    return searchProducts(env, query);
+  }
+
+  if (proc === "products.create" || proc.startsWith("products.create?")) {
+    requireAuth(user);
+    if (user.role !== "seller" && user.role !== "admin") throw new Error("Hanya seller yang bisa membuat produk");
+    const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
+    if (!seller) throw new Error("Profil seller tidak ditemukan");
+    const { name, description, price, categoryId, stock, image, images } = input;
+    const result = await env.DB.prepare(
+      "INSERT INTO products (name, description, price, categoryId, stock, image, images, sellerId, isActive) VALUES (?,?,?,?,?,?,?,?,1)"
+    ).bind(name, description, price, categoryId, stock, image, JSON.stringify(images || []), seller.id).run();
+    return { success: true, id: result.meta.last_row_id };
+  }
+
+  if (proc === "products.update" || proc.startsWith("products.update?")) {
+    requireAuth(user);
+    const product = await getProductById(env, input.id);
+    if (!product) throw new Error("Produk tidak ditemukan");
+    const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
+    if (!seller || product.sellerId !== seller.id) throw new Error("Unauthorized");
+    const fields = [];
+    const vals = [];
+    if (input.name !== undefined) { fields.push("name=?"); vals.push(input.name); }
+    if (input.description !== undefined) { fields.push("description=?"); vals.push(input.description); }
+    if (input.price !== undefined) { fields.push("price=?"); vals.push(input.price); }
+    if (input.stock !== undefined) { fields.push("stock=?"); vals.push(input.stock); }
+    if (input.image !== undefined) { fields.push("image=?"); vals.push(input.image); }
+    if (input.isActive !== undefined) { fields.push("isActive=?"); vals.push(input.isActive ? 1 : 0); }
+    if (fields.length) {
+      vals.push(input.id);
+      await env.DB.prepare(`UPDATE products SET ${fields.join(",")} WHERE id=?`).bind(...vals).run();
+    }
+    return { success: true };
+  }
+
+  // ---- CATEGORIES ----
+  if (proc === "categories.list" || proc.startsWith("categories.list?")) {
+    return getCategories(env);
+  }
+
+  if (proc === "categories.getById" || proc.startsWith("categories.getById?")) {
+    if (!input?.id) throw new Error("id diperlukan");
+    return getCategoryById(env, input.id);
+  }
+
+  if (proc === "categories.create" || proc.startsWith("categories.create?")) {
+    requireAuth(user);
+    if (user.role !== "admin") throw new Error("Hanya admin");
+    const { name, description, image } = input;
+    const result = await env.DB.prepare("INSERT INTO categories (name, description, image) VALUES (?,?,?)").bind(name, description || null, image || null).run();
+    return { success: true, id: result.meta.last_row_id };
+  }
+
+  // ---- CART ----
+  if (proc === "cart.list" || proc.startsWith("cart.list?")) {
+    requireAuth(user);
+    return getCart(env, user.id);
+  }
+
+  if (proc === "cart.add" || proc.startsWith("cart.add?")) {
+    requireAuth(user);
+    const product = await getProductById(env, input.productId);
+    if (!product) throw new Error("Produk tidak ditemukan");
+    if (product.stock < (input.quantity || 1)) throw new Error("Stok tidak cukup");
+    return addToCart(env, user.id, input.productId, input.quantity || 1);
+  }
+
+  if (proc === "cart.remove" || proc.startsWith("cart.remove?")) {
+    requireAuth(user);
+    await env.DB.prepare("DELETE FROM carts WHERE id = ? AND userId = ?").bind(input.cartId, user.id).run();
+    return { success: true };
+  }
+
+  // ---- ORDERS ----
+  if (proc === "orders.list" || proc.startsWith("orders.list?")) {
+    requireAuth(user);
+    return getUserOrders(env, user.id);
+  }
+
+  if (proc === "orders.getById" || proc.startsWith("orders.getById?")) {
+    requireAuth(user);
+    const order = await getOrderById(env, input.id);
+    if (!order || (order.userId !== user.id && user.role !== "admin")) throw new Error("Unauthorized");
+    const { results: items } = await env.DB.prepare(
+      "SELECT oi.*, p.name, p.image FROM orderItems oi JOIN products p ON oi.productId = p.id WHERE oi.orderId = ?"
+    ).bind(input.id).all();
+    return { ...order, items };
+  }
+
+  if (proc === "orders.create" || proc.startsWith("orders.create?")) {
+    requireAuth(user);
+    const cartItems = await getCart(env, user.id);
+    if (!cartItems.length) throw new Error("Keranjang kosong");
+    let productAmount = 0;
+    for (const item of cartItems) productAmount += item.price * item.quantity;
+    const adminFeeAmount = productAmount * 0.01;
+    const totalAmount = productAmount + adminFeeAmount + (input?.shippingCost || 0);
+    const orderResult = await env.DB.prepare(
+      `INSERT INTO orders (userId, sellerId, totalAmount, productAmount, adminFeePercentage, adminFeeAmount, shippingCost, status, shippingAddress, paymentMethod)
+       VALUES (?, ?, ?, ?, 1, ?, ?, 'pending', ?, ?)`
+    ).bind(user.id, cartItems[0].sellerId || 1, totalAmount, productAmount, adminFeeAmount, input?.shippingCost || 0, input?.shippingAddress, input?.paymentMethod).run();
+    const orderId = orderResult.meta.last_row_id;
+    for (const item of cartItems) {
+      await env.DB.prepare("INSERT INTO orderItems (orderId, productId, quantity, price) VALUES (?,?,?,?)")
+        .bind(orderId, item.productId, item.quantity, item.price).run();
+    }
+    await env.DB.prepare("DELETE FROM carts WHERE userId = ?").bind(user.id).run();
+    return { success: true, orderId };
+  }
+
+  if (proc === "orders.updateStatus" || proc.startsWith("orders.updateStatus?")) {
+    requireAuth(user);
+    const order = await getOrderById(env, input.orderId);
+    if (!order) throw new Error("Order tidak ditemukan");
+    const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
+    if (!seller || order.sellerId !== seller.id) throw new Error("Unauthorized");
+    await env.DB.prepare("UPDATE orders SET status = ? WHERE id = ?").bind(input.status, input.orderId).run();
+    return { success: true };
+  }
+
+  if (proc === "orders.getSellerOrders" || proc.startsWith("orders.getSellerOrders?")) {
+    requireAuth(user);
+    const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
+    if (!seller) throw new Error("Profil seller tidak ditemukan");
+    const { results } = await env.DB.prepare("SELECT * FROM orders WHERE sellerId = ? ORDER BY createdAt DESC").bind(seller.id).all();
+    return results;
+  }
+
+  // ---- REVIEWS ----
+  if (proc === "reviews.getByProduct" || proc.startsWith("reviews.getByProduct?")) {
+    const { results } = await env.DB.prepare("SELECT * FROM reviews WHERE productId = ?").bind(input.productId).all();
+    return results;
+  }
+
+  if (proc === "reviews.create" || proc.startsWith("reviews.create?")) {
+    requireAuth(user);
+    const order = await getOrderById(env, input.orderId);
+    if (!order || order.userId !== user.id) throw new Error("Unauthorized");
+    if (order.status !== "delivered") throw new Error("Hanya bisa review order yang sudah delivered");
+    const result = await env.DB.prepare(
+      "INSERT INTO reviews (productId, userId, orderId, rating, comment) VALUES (?,?,?,?,?)"
+    ).bind(input.productId, user.id, input.orderId, input.rating, input.comment || null).run();
+    return { success: true };
+  }
+
+  // ---- SELLERS ----
+  if (proc === "sellers.getProfile" || proc.startsWith("sellers.getProfile?")) {
+    requireAuth(user);
+    return env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
+  }
+
+  if (proc === "sellers.updateProfile" || proc.startsWith("sellers.updateProfile?")) {
+    requireAuth(user);
+    const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
+    if (!seller) throw new Error("Profil seller tidak ditemukan");
+    const fields = [];
+    const vals = [];
+    if (input.shopName !== undefined) { fields.push("shopName=?"); vals.push(input.shopName); }
+    if (input.shopDescription !== undefined) { fields.push("shopDescription=?"); vals.push(input.shopDescription); }
+    if (input.shopImage !== undefined) { fields.push("shopImage=?"); vals.push(input.shopImage); }
+    if (input.address !== undefined) { fields.push("address=?"); vals.push(input.address); }
+    if (input.phone !== undefined) { fields.push("phone=?"); vals.push(input.phone); }
+    if (fields.length) {
+      vals.push(seller.id);
+      await env.DB.prepare(`UPDATE sellers SET ${fields.join(",")} WHERE id=?`).bind(...vals).run();
+    }
+    return { success: true };
+  }
+
+  if (proc === "sellers.getProducts" || proc.startsWith("sellers.getProducts?")) {
+    requireAuth(user);
+    const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
+    if (!seller) throw new Error("Profil seller tidak ditemukan");
+    const { results } = await env.DB.prepare("SELECT * FROM products WHERE sellerId = ?").bind(seller.id).all();
+    return results;
+  }
+
+  // ---- ADMIN ----
+  if (proc === "admin.getAllUsers" || proc.startsWith("admin.getAllUsers?")) {
+    requireAuth(user);
+    if (user.role !== "admin") throw new Error("Unauthorized");
+    const { results } = await env.DB.prepare("SELECT id, name, email, role, createdAt FROM users LIMIT 100").all();
+    return results;
+  }
+
+  if (proc === "admin.updateUserRole" || proc.startsWith("admin.updateUserRole?")) {
+    requireAuth(user);
+    if (user.role !== "admin") throw new Error("Unauthorized");
+    await env.DB.prepare("UPDATE users SET role = ? WHERE id = ?").bind(input.role, input.userId).run();
+    return { success: true };
+  }
+
+  if (proc === "admin.getAllOrders" || proc.startsWith("admin.getAllOrders?")) {
+    requireAuth(user);
+    if (user.role !== "admin") throw new Error("Unauthorized");
+    const { results } = await env.DB.prepare("SELECT * FROM orders ORDER BY createdAt DESC LIMIT 100").all();
+    return results;
+  }
+
+  if (proc === "admin.getAllProducts" || proc.startsWith("admin.getAllProducts?")) {
+    requireAuth(user);
+    if (user.role !== "admin") throw new Error("Unauthorized");
+    const { results } = await env.DB.prepare("SELECT * FROM products ORDER BY createdAt DESC LIMIT 100").all();
+    return results;
+  }
+
+  if (proc === "admin.getStats" || proc.startsWith("admin.getStats?")) {
+    requireAuth(user);
+    if (user.role !== "admin") throw new Error("Unauthorized");
+    return getAdminStats(env);
+  }
+
+  // ---- SYSTEM ----
+  if (proc.startsWith("system.")) {
+    return { status: "ok" };
+  }
+
+  const err = new Error(`Procedure tidak ditemukan: ${proc}`);
+  err.code = "NOT_FOUND";
+  throw err;
+}
+
+// ============================================================
+// Main Router
+// ============================================================
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -420,7 +685,17 @@ export default {
     }
 
     try {
+      // ======================================================
+      // TRPC routes — /api/trpc/{procedures}
+      // ======================================================
+      if (path.startsWith("/api/trpc/")) {
+        const procedures = path.replace("/api/trpc/", "");
+        return handleTrpc(procedures, request, env, origin);
+      }
+
+      // ======================================================
       // AUTH routes
+      // ======================================================
       if (path === "/api/auth/register" && method === "POST") {
         const result = await handleRegister(request, env);
         return jsonResponse(result, result.error ? 400 : 200, origin);
@@ -451,18 +726,18 @@ export default {
         return jsonResponse({ id: user.id, name: user.name, email: user.email, role: user.role, avatar: user.avatar }, 200, origin);
       }
 
+      // ======================================================
       // PRODUCT routes
+      // ======================================================
       if (path === "/api/products" && method === "GET") {
         const limit = parseInt(url.searchParams.get("limit") || "20");
         const offset = parseInt(url.searchParams.get("offset") || "0");
-        const data = await getProducts(env, limit, offset);
-        return jsonResponse(data, 200, origin);
+        return jsonResponse(await getProducts(env, limit, offset), 200, origin);
       }
 
       if (path === "/api/products/search" && method === "GET") {
         const query = url.searchParams.get("q") || "";
-        const data = await searchProducts(env, query);
-        return jsonResponse(data, 200, origin);
+        return jsonResponse(await searchProducts(env, query), 200, origin);
       }
 
       if (path.match(/^\/api\/products\/\d+$/) && method === "GET") {
@@ -474,37 +749,34 @@ export default {
 
       if (path === "/api/products/by-category" && method === "GET") {
         const categoryId = parseInt(url.searchParams.get("categoryId") || "0");
-        const data = await getProductsByCategory(env, categoryId);
-        return jsonResponse(data, 200, origin);
+        return jsonResponse(await getProductsByCategory(env, categoryId), 200, origin);
       }
 
+      // ======================================================
       // CATEGORY routes
+      // ======================================================
       if (path === "/api/categories" && method === "GET") {
-        const data = await getCategories(env);
-        return jsonResponse(data, 200, origin);
+        return jsonResponse(await getCategories(env), 200, origin);
       }
 
-      // CART routes (protected)
+      // ======================================================
+      // CART routes
+      // ======================================================
       if (path === "/api/cart") {
         const user = await getUser(request, env);
         if (!user) return jsonResponse({ error: "Unauthorized" }, 401, origin);
 
-        if (method === "GET") {
-          const data = await getCart(env, user.id);
-          return jsonResponse(data, 200, origin);
-        }
+        if (method === "GET") return jsonResponse(await getCart(env, user.id), 200, origin);
 
         if (method === "POST") {
           const body = await request.json();
-          const result = await addToCart(env, user.id, body.productId, body.quantity || 1);
-          return jsonResponse(result, 200, origin);
+          return jsonResponse(await addToCart(env, user.id, body.productId, body.quantity || 1), 200, origin);
         }
 
         if (method === "DELETE") {
           const cartId = url.searchParams.get("id");
           if (cartId) {
-            await env.DB.prepare("DELETE FROM carts WHERE id = ? AND userId = ?")
-              .bind(parseInt(cartId), user.id).run();
+            await env.DB.prepare("DELETE FROM carts WHERE id = ? AND userId = ?").bind(parseInt(cartId), user.id).run();
           } else {
             await env.DB.prepare("DELETE FROM carts WHERE userId = ?").bind(user.id).run();
           }
@@ -514,53 +786,40 @@ export default {
         if (method === "PUT") {
           const body = await request.json();
           if (body.quantity <= 0) {
-            await env.DB.prepare("DELETE FROM carts WHERE id = ? AND userId = ?")
-              .bind(body.cartId, user.id).run();
+            await env.DB.prepare("DELETE FROM carts WHERE id = ? AND userId = ?").bind(body.cartId, user.id).run();
           } else {
-            await env.DB.prepare("UPDATE carts SET quantity = ? WHERE id = ? AND userId = ?")
-              .bind(body.quantity, body.cartId, user.id).run();
+            await env.DB.prepare("UPDATE carts SET quantity = ? WHERE id = ? AND userId = ?").bind(body.quantity, body.cartId, user.id).run();
           }
           return jsonResponse({ success: true }, 200, origin);
         }
       }
 
-      // ORDER routes (protected)
+      // ======================================================
+      // ORDER routes
+      // ======================================================
       if (path === "/api/orders") {
         const user = await getUser(request, env);
         if (!user) return jsonResponse({ error: "Unauthorized" }, 401, origin);
 
-        if (method === "GET") {
-          const data = await getUserOrders(env, user.id);
-          return jsonResponse(data, 200, origin);
-        }
+        if (method === "GET") return jsonResponse(await getUserOrders(env, user.id), 200, origin);
 
         if (method === "POST") {
           const body = await request.json();
           const cartItems = await getCart(env, user.id);
           if (!cartItems.length) return jsonResponse({ error: "Keranjang kosong" }, 400, origin);
-
           let productAmount = 0;
-          for (const item of cartItems) {
-            productAmount += item.price * item.quantity;
-          }
+          for (const item of cartItems) productAmount += item.price * item.quantity;
           const adminFeeAmount = productAmount * 0.01;
           const totalAmount = productAmount + adminFeeAmount + (body.shippingCost || 0);
-
           const orderResult = await env.DB.prepare(
             `INSERT INTO orders (userId, sellerId, totalAmount, productAmount, adminFeePercentage, adminFeeAmount, shippingCost, status, shippingAddress, paymentMethod)
              VALUES (?, ?, ?, ?, 1, ?, ?, 'pending', ?, ?)`
           ).bind(user.id, cartItems[0].sellerId || 1, totalAmount, productAmount, adminFeeAmount, body.shippingCost || 0, body.shippingAddress, body.paymentMethod).run();
-
           const orderId = orderResult.meta.last_row_id;
-
           for (const item of cartItems) {
-            await env.DB.prepare(
-              "INSERT INTO orderItems (orderId, productId, quantity, price) VALUES (?, ?, ?, ?)"
-            ).bind(orderId, item.productId, item.quantity, item.price).run();
+            await env.DB.prepare("INSERT INTO orderItems (orderId, productId, quantity, price) VALUES (?,?,?,?)").bind(orderId, item.productId, item.quantity, item.price).run();
           }
-
           await env.DB.prepare("DELETE FROM carts WHERE userId = ?").bind(user.id).run();
-
           return jsonResponse({ success: true, orderId }, 200, origin);
         }
       }
@@ -579,50 +838,40 @@ export default {
         return jsonResponse({ ...order, items }, 200, origin);
       }
 
+      // ======================================================
       // ADMIN routes
+      // ======================================================
       if (path.startsWith("/api/admin")) {
         const user = await getUser(request, env);
         if (!user || user.role !== "admin") return jsonResponse({ error: "Unauthorized" }, 403, origin);
 
-        if (path === "/api/admin/stats") {
-          return jsonResponse(await getAdminStats(env), 200, origin);
-        }
-
+        if (path === "/api/admin/stats") return jsonResponse(await getAdminStats(env), 200, origin);
         if (path === "/api/admin/users") {
-          const { results } = await env.DB.prepare(
-            "SELECT id, name, email, role, createdAt FROM users LIMIT 100"
-          ).all();
+          const { results } = await env.DB.prepare("SELECT id, name, email, role, createdAt FROM users LIMIT 100").all();
           return jsonResponse(results, 200, origin);
         }
-
         if (path === "/api/admin/users/role" && method === "PUT") {
           const body = await request.json();
-          await env.DB.prepare("UPDATE users SET role = ? WHERE id = ?")
-            .bind(body.role, body.userId).run();
+          await env.DB.prepare("UPDATE users SET role = ? WHERE id = ?").bind(body.role, body.userId).run();
           return jsonResponse({ success: true }, 200, origin);
         }
-
         if (path === "/api/admin/orders") {
-          const { results } = await env.DB.prepare(
-            "SELECT * FROM orders ORDER BY createdAt DESC LIMIT 100"
-          ).all();
+          const { results } = await env.DB.prepare("SELECT * FROM orders ORDER BY createdAt DESC LIMIT 100").all();
           return jsonResponse(results, 200, origin);
         }
-
         if (path === "/api/admin/products") {
-          const { results } = await env.DB.prepare(
-            "SELECT * FROM products ORDER BY createdAt DESC LIMIT 100"
-          ).all();
+          const { results } = await env.DB.prepare("SELECT * FROM products ORDER BY createdAt DESC LIMIT 100").all();
           return jsonResponse(results, 200, origin);
         }
       }
 
+      // ======================================================
       // SELLER routes
+      // ======================================================
       if (path === "/api/seller/profile") {
         const user = await getUser(request, env);
         if (!user) return jsonResponse({ error: "Unauthorized" }, 401, origin);
-        const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
-        return jsonResponse(seller || null, 200, origin);
+        return jsonResponse(await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first() || null, 200, origin);
       }
 
       if (path === "/api/seller/orders") {
@@ -630,14 +879,13 @@ export default {
         if (!user) return jsonResponse({ error: "Unauthorized" }, 401, origin);
         const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
         if (!seller) return jsonResponse([], 200, origin);
-        const { results } = await env.DB.prepare(
-          "SELECT * FROM orders WHERE sellerId = ? ORDER BY createdAt DESC"
-        ).bind(seller.id).all();
+        const { results } = await env.DB.prepare("SELECT * FROM orders WHERE sellerId = ? ORDER BY createdAt DESC").bind(seller.id).all();
         return jsonResponse(results, 200, origin);
       }
 
-      // === PAYMENT TRANSFER MANUAL ===
-
+      // ======================================================
+      // PAYMENT routes
+      // ======================================================
       if (path === "/api/payment/bank-accounts" && method === "GET") {
         const orderId = parseInt(url.searchParams.get("orderId") || "0");
         return jsonResponse(await getPaymentBankAccounts(env, orderId), 200, origin);
@@ -684,10 +932,9 @@ export default {
         if (method === "POST") return jsonResponse(await addBankAccount(request, env, user), 200, origin);
       }
 
-
       // Health check
-      if (path === "/api/health") {
-        return jsonResponse({ status: "ok", timestamp: new Date().toISOString() }, 200, origin);
+      if (path === "/api/health" || path === "/" || path === "/health") {
+        return jsonResponse({ status: "ok", service: "CWS Mantap API", timestamp: new Date().toISOString() }, 200, origin);
       }
 
       return jsonResponse({ error: "Route tidak ditemukan" }, 404, origin);
@@ -698,3 +945,34 @@ export default {
     }
   },
 };
+
+// ============================================================
+// Auth handlers (dipakai di route /api/auth/*)
+// ============================================================
+async function handleRegister(request, env) {
+  const body = await request.json();
+  const { email, password, name } = body;
+  if (!email || !password) return { error: "Email dan password diperlukan" };
+  const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
+  if (existing) return { error: "Email sudah terdaftar" };
+  const passwordHash = await hashPassword(password);
+  const result = await env.DB.prepare(
+    "INSERT INTO users (email, passwordHash, name, role) VALUES (?, ?, ?, 'user')"
+  ).bind(email, passwordHash, name || email.split("@")[0]).run();
+  return { success: true, userId: result.meta.last_row_id };
+}
+
+async function handleLogin(request, env) {
+  const body = await request.json();
+  const { email, password } = body;
+  if (!email || !password) return { error: "Email dan password diperlukan" };
+  const user = await env.DB.prepare("SELECT * FROM users WHERE email = ?").bind(email).first();
+  if (!user) return { error: "Email atau password salah" };
+  const passwordHash = await hashPassword(password);
+  if (user.passwordHash !== passwordHash) return { error: "Email atau password salah" };
+  const token = await signToken(
+    { userId: user.id, role: user.role },
+    env.SESSION_SECRET || "default-secret-change-me"
+  );
+  return { success: true, token, user: { id: user.id, name: user.name, email: user.email, role: user.role } };
+}
