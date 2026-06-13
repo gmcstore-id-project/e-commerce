@@ -1,18 +1,52 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
 import { useLocation } from "wouter";
-import { getLoginUrl } from "@/const";
-import { LogIn, ArrowRight } from "lucide-react";
+import { LogIn } from "lucide-react";
+
+const API_URL =
+  import.meta.env.VITE_API_URL || "https://cws-ecommerce-api.nadiracemilan25.workers.dev";
 
 export default function Login() {
   const [, setLocation] = useLocation();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleMausOAuthLogin = () => {
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    if (!email.trim() || !password) {
+      setError("Email dan password wajib diisi");
+      return;
+    }
+
     setIsLoading(true);
-    window.location.href = getLoginUrl();
+    try {
+      const res = await fetch(`${API_URL}/api/auth/login`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || data.error) {
+        setError(data.error || "Email atau password salah");
+        setIsLoading(false);
+        return;
+      }
+
+      window.location.href = "/";
+    } catch (err) {
+      setError("Gagal terhubung ke server. Coba lagi.");
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -29,27 +63,54 @@ export default function Login() {
 
         {/* Login Card */}
         <Card className="p-8 shadow-lg border-0">
-          <div className="space-y-6">
-            {/* OAuth Button */}
-            <div>
-              <Button
-                onClick={handleMausOAuthLogin}
-                disabled={isLoading}
-                className="w-full h-11 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white font-semibold rounded-lg transition-all duration-200 flex items-center justify-center gap-2"
-              >
-                {isLoading ? (
-                  <>
-                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    Sedang masuk...
-                  </>
-                ) : (
-                  <>
-                    <LogIn className="w-5 h-5" />
-                    Masuk
-                  </>
-                )}
-              </Button>
+          <form onSubmit={handleLogin} className="space-y-6">
+            <div className="space-y-2">
+              <Label htmlFor="email">Email</Label>
+              <Input
+                id="email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="nama@email.com"
+                autoComplete="email"
+              />
             </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="password">Password</Label>
+              <Input
+                id="password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                autoComplete="current-password"
+              />
+            </div>
+
+            {error && (
+              <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">
+                {error}
+              </p>
+            )}
+
+            <Button
+              type="submit"
+              disabled={isLoading}
+              className="w-full h-11 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white font-semibold rounded-lg transition-all duration-200 flex items-center justify-center gap-2"
+            >
+              {isLoading ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  Sedang masuk...
+                </>
+              ) : (
+                <>
+                  <LogIn className="w-5 h-5" />
+                  Masuk
+                </>
+              )}
+            </Button>
 
             {/* Divider */}
             <div className="relative">
@@ -61,23 +122,30 @@ export default function Login() {
               </div>
             </div>
 
-            {/* Info Text */}
-            <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
-              <p className="text-sm text-slate-700">
-                <span className="font-semibold text-orange-900">Belum punya akun?</span>
-                {" "}Anda dapat mendaftar saat pertama kali masuk.
+            {/* Register Link */}
+            <div className="text-center">
+              <p className="text-slate-600 text-sm">
+                Belum punya akun?{" "}
+                <button
+                  type="button"
+                  onClick={() => setLocation("/register")}
+                  className="text-blue-600 hover:underline font-semibold"
+                >
+                  Daftar di sini
+                </button>
               </p>
             </div>
 
             {/* Back Button */}
             <Button
+              type="button"
               onClick={() => setLocation("/")}
               variant="outline"
               className="w-full h-11 border-slate-300 text-slate-700 hover:bg-slate-50 font-medium rounded-lg transition-colors"
             >
               Kembali ke Beranda
             </Button>
-          </div>
+          </form>
         </Card>
 
         {/* Footer Info */}
@@ -86,8 +154,8 @@ export default function Login() {
             Dengan masuk, Anda menyetujui{" "}
             <a href="#" className="text-blue-600 hover:underline">
               Syarat Layanan
-            </a>
-            {" "}dan{" "}
+            </a>{" "}
+            dan{" "}
             <a href="#" className="text-blue-600 hover:underline">
               Kebijakan Privasi
             </a>
