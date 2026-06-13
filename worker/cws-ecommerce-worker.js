@@ -235,178 +235,6 @@ async function getAdminStats(env) {
 // ============================================================
 // Main Router
 // ============================================================
-
-// ============================================================
-// PAYMENT TRANSFER MANUAL — Fungsi-fungsi
-// ============================================================
-async function sendEmail(env, { to, subject, html }) {
-  if (!env.RESEND_API_KEY) return;
-  try {
-    await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: "CWS Mantap <noreply@cws-mantap.pages.dev>", to: [to], subject, html }),
-    });
-  } catch (e) { console.error("Email failed:", e); }
-}
-
-function emailBuyerWaiting(name, orderId, amount) {
-  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#e11d48">CWS Mantap</h2><p>Halo <strong>${name}</strong>, bukti transfer Order <strong>#${orderId}</strong> sudah diterima.</p><p>Total: <strong>Rp ${Number(amount).toLocaleString("id-ID")}</strong></p><p>Seller sedang memverifikasi. Notifikasi dikirim setelah dikonfirmasi.</p></div>`;
-}
-function emailSellerNew(sellerName, orderId, buyerName, amount) {
-  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#e11d48">CWS Mantap</h2><p>Halo <strong>${sellerName}</strong>, ada bukti transfer baru dari <strong>${buyerName}</strong>.</p><p>Order <strong>#${orderId}</strong> | Total: <strong>Rp ${Number(amount).toLocaleString("id-ID")}</strong></p><a href="https://cws-mantap.pages.dev/seller/payments" style="display:inline-block;padding:10px 20px;background:#e11d48;color:white;text-decoration:none;border-radius:6px;margin-top:10px">Buka Dashboard Seller</a></div>`;
-}
-function emailBuyerConfirmed(name, orderId) {
-  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#e11d48">CWS Mantap</h2><p>Halo <strong>${name}</strong>, pembayaran Order <strong>#${orderId}</strong> telah <strong style="color:#16a34a">DIKONFIRMASI</strong>! 🎉</p><p>Seller sedang memproses pesananmu.</p><a href="https://cws-mantap.pages.dev/orders" style="display:inline-block;padding:10px 20px;background:#16a34a;color:white;text-decoration:none;border-radius:6px;margin-top:10px">Cek Pesanan</a></div>`;
-}
-function emailBuyerRejected(name, orderId, reason) {
-  return `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#e11d48">CWS Mantap</h2><p>Halo <strong>${name}</strong>, bukti transfer Order <strong>#${orderId}</strong> <strong style="color:#dc2626">DITOLAK</strong>.</p><p><strong>Alasan:</strong> ${reason}</p><a href="https://cws-mantap.pages.dev/orders/${orderId}/payment" style="display:inline-block;padding:10px 20px;background:#e11d48;color:white;text-decoration:none;border-radius:6px;margin-top:10px">Upload Ulang</a></div>`;
-}
-
-async function saveImageToKV(env, orderId, arrayBuffer, contentType) {
-  if (!env.PAYMENT_IMAGES) throw new Error("KV binding PAYMENT_IMAGES tidak ditemukan");
-  const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-  await env.PAYMENT_IMAGES.put(`proof:${orderId}`, JSON.stringify({ base64, contentType, uploadedAt: new Date().toISOString() }), { expirationTtl: 31536000 });
-}
-
-async function getImageFromKV(env, orderId) {
-  if (!env.PAYMENT_IMAGES) return null;
-  const data = await env.PAYMENT_IMAGES.get(`proof:${orderId}`);
-  return data ? JSON.parse(data) : null;
-}
-
-async function getPaymentBankAccounts(env, orderId) {
-  const order = await env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(orderId).first();
-  if (!order) return { error: "Order tidak ditemukan" };
-  const { results } = await env.DB.prepare("SELECT * FROM bankAccounts WHERE sellerId = ? AND isActive = 1").bind(order.sellerId).all();
-  return { order, bankAccounts: results };
-}
-
-async function getPaymentImage(env, orderId, user) {
-  const order = await env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(orderId).first();
-  if (!order) return null;
-  const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
-  const ok = order.userId === user.id || (seller && seller.id === order.sellerId) || user.role === "admin";
-  if (!ok) return null;
-  return getImageFromKV(env, orderId);
-}
-
-async function uploadPaymentProof(request, env, user) {
-  const formData = await request.formData();
-  const orderId = parseInt(formData.get("orderId"));
-  const file = formData.get("proof");
-  const bankFrom = formData.get("bankFrom") || "";
-  const amountTransferred = parseFloat(formData.get("amountTransferred") || "0");
-  const transferNote = formData.get("transferNote") || "";
-
-  if (!orderId || !file) return { error: "orderId dan file wajib diisi" };
-
-  const order = await env.DB.prepare(
-    `SELECT o.*, u.name as buyerName, u.email as buyerEmail, s.userId as sellerUserId
-     FROM orders o JOIN users u ON o.userId = u.id JOIN sellers s ON o.sellerId = s.id
-     WHERE o.id = ? AND o.userId = ?`
-  ).bind(orderId, user.id).first();
-  if (!order) return { error: "Order tidak ditemukan atau bukan milikmu" };
-
-  const existing = await env.DB.prepare("SELECT * FROM paymentProofs WHERE orderId = ?").bind(orderId).first();
-  if (existing?.status === "waiting") return { error: "Sudah diupload, menunggu konfirmasi seller" };
-  if (existing?.status === "confirmed") return { error: "Pembayaran sudah dikonfirmasi" };
-
-  if (!["image/jpeg","image/png","image/webp"].includes(file.type)) return { error: "Format file tidak valid. Gunakan JPG, PNG, atau WEBP" };
-  if (file.size > 3 * 1024 * 1024) return { error: "Ukuran file maksimal 3MB" };
-
-  const arrayBuffer = await file.arrayBuffer();
-  await saveImageToKV(env, orderId, arrayBuffer, file.type);
-
-  if (existing?.status === "rejected") {
-    await env.DB.prepare(`UPDATE paymentProofs SET bankFrom=?, amountTransferred=?, transferNote=?, status='waiting', rejectionReason=NULL, updatedAt=datetime('now') WHERE id=?`).bind(bankFrom, amountTransferred, transferNote, existing.id).run();
-  } else {
-    await env.DB.prepare(`INSERT INTO paymentProofs (orderId, userId, imageUrl, imageKey, bankFrom, amountTransferred, transferNote) VALUES (?,?,?,?,?,?,?)`).bind(orderId, user.id, `kv:proof:${orderId}`, `proof:${orderId}`, bankFrom, amountTransferred, transferNote).run();
-  }
-
-  await env.DB.prepare("UPDATE orders SET paymentStatus='waiting_confirmation', updatedAt=datetime('now') WHERE id=?").bind(orderId).run();
-
-  await sendEmail(env, { to: order.buyerEmail, subject: `[CWS Mantap] Bukti Transfer Diterima - Order #${orderId}`, html: emailBuyerWaiting(order.buyerName, orderId, order.totalAmount) });
-
-  const seller = await env.DB.prepare("SELECT u.email, u.name FROM users u WHERE u.id = ?").bind(order.sellerUserId).first();
-  if (seller) await sendEmail(env, { to: seller.email, subject: `[CWS Mantap] Bukti Transfer Baru - Order #${orderId}`, html: emailSellerNew(seller.name, orderId, order.buyerName, order.totalAmount) });
-
-  return { success: true, message: "Bukti transfer berhasil diupload. Menunggu konfirmasi seller." };
-}
-
-async function getPaymentProof(env, orderId, user) {
-  const order = await env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(orderId).first();
-  if (!order) return { error: "Order tidak ditemukan" };
-  const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
-  const ok = order.userId === user.id || (seller && seller.id === order.sellerId) || user.role === "admin";
-  if (!ok) return { error: "Unauthorized" };
-  const proof = await env.DB.prepare("SELECT * FROM paymentProofs WHERE orderId = ?").bind(orderId).first();
-  return { order, proof: proof || null };
-}
-
-async function confirmPayment(request, env, user) {
-  const body = await request.json();
-  const { orderId, action, rejectionReason } = body;
-  if (!orderId || !action) return { error: "orderId dan action wajib" };
-  if (!["confirm","reject"].includes(action)) return { error: "Action tidak valid" };
-  if (action === "reject" && !rejectionReason) return { error: "Alasan penolakan wajib diisi" };
-
-  const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
-  if (!seller && user.role !== "admin") return { error: "Bukan seller" };
-
-  const order = await env.DB.prepare(`SELECT o.*, u.name as buyerName, u.email as buyerEmail FROM orders o JOIN users u ON o.userId = u.id WHERE o.id = ?`).bind(orderId).first();
-  if (!order) return { error: "Order tidak ditemukan" };
-  if (seller && order.sellerId !== seller.id && user.role !== "admin") return { error: "Bukan order kamu" };
-
-  const proof = await env.DB.prepare("SELECT * FROM paymentProofs WHERE orderId = ?").bind(orderId).first();
-  if (!proof) return { error: "Bukti transfer tidak ditemukan" };
-  if (proof.status !== "waiting") return { error: "Status sudah diproses" };
-
-  if (action === "confirm") {
-    await env.DB.prepare(`UPDATE paymentProofs SET status='confirmed', confirmedAt=datetime('now'), confirmedBy=?, updatedAt=datetime('now') WHERE orderId=?`).bind(user.id, orderId).run();
-    await env.DB.prepare("UPDATE orders SET paymentStatus='confirmed', status='processing', updatedAt=datetime('now') WHERE id=?").bind(orderId).run();
-    await sendEmail(env, { to: order.buyerEmail, subject: `[CWS Mantap] Pembayaran Dikonfirmasi - Order #${orderId}`, html: emailBuyerConfirmed(order.buyerName, orderId) });
-    return { success: true, message: "Pembayaran dikonfirmasi!" };
-  } else {
-    await env.DB.prepare(`UPDATE paymentProofs SET status='rejected', rejectionReason=?, updatedAt=datetime('now') WHERE orderId=?`).bind(rejectionReason, orderId).run();
-    await env.DB.prepare("UPDATE orders SET paymentStatus='rejected', updatedAt=datetime('now') WHERE id=?").bind(orderId).run();
-    await sendEmail(env, { to: order.buyerEmail, subject: `[CWS Mantap] Bukti Transfer Ditolak - Order #${orderId}`, html: emailBuyerRejected(order.buyerName, orderId, rejectionReason) });
-    return { success: true, message: "Bukti transfer ditolak." };
-  }
-}
-
-async function getSellerPendingPayments(env, user) {
-  const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
-  if (!seller) return { error: "Bukan seller" };
-  const { results } = await env.DB.prepare(
-    `SELECT o.*, u.name as buyerName, u.email as buyerEmail,
-            pp.bankFrom, pp.amountTransferred, pp.transferNote,
-            pp.status as proofStatus, pp.createdAt as proofUploadedAt, pp.id as proofId,
-            pp.rejectionReason
-     FROM orders o JOIN users u ON o.userId = u.id
-     LEFT JOIN paymentProofs pp ON o.id = pp.orderId
-     WHERE o.sellerId = ? AND o.paymentStatus IN ('waiting_confirmation','confirmed','rejected')
-     ORDER BY pp.createdAt DESC`
-  ).bind(seller.id).all();
-  return results;
-}
-
-async function getSellerBankAccounts(env, user) {
-  const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
-  if (!seller) return { error: "Bukan seller" };
-  const { results } = await env.DB.prepare("SELECT * FROM bankAccounts WHERE sellerId = ? AND isActive = 1").bind(seller.id).all();
-  return results;
-}
-
-async function addBankAccount(request, env, user) {
-  const seller = await env.DB.prepare("SELECT * FROM sellers WHERE userId = ?").bind(user.id).first();
-  if (!seller) return { error: "Bukan seller" };
-  const { bankName, accountNumber, accountName } = await request.json();
-  if (!bankName || !accountNumber || !accountName) return { error: "Semua field wajib diisi" };
-  const result = await env.DB.prepare("INSERT INTO bankAccounts (sellerId, bankName, accountNumber, accountName) VALUES (?,?,?,?)").bind(seller.id, bankName, accountNumber, accountName).run();
-  return { success: true, id: result.meta.last_row_id };
-}
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -636,58 +464,196 @@ export default {
         return jsonResponse(results, 200, origin);
       }
 
-      // === PAYMENT TRANSFER MANUAL ===
-
-      if (path === "/api/payment/bank-accounts" && method === "GET") {
-        const orderId = parseInt(url.searchParams.get("orderId") || "0");
-        return jsonResponse(await getPaymentBankAccounts(env, orderId), 200, origin);
-      }
-
-      if (path === "/api/payment/upload-proof" && method === "POST") {
-        const user = await getUser(request, env);
-        if (!user) return jsonResponse({ error: "Unauthorized" }, 401, origin);
-        return jsonResponse(await uploadPaymentProof(request, env, user), 200, origin);
-      }
-
-      if (path.match(/^\/api\/payment\/proof\/\d+$/) && method === "GET") {
-        const user = await getUser(request, env);
-        if (!user) return jsonResponse({ error: "Unauthorized" }, 401, origin);
-        const orderId = parseInt(path.split("/").pop());
-        return jsonResponse(await getPaymentProof(env, orderId, user), 200, origin);
-      }
-
-      if (path.match(/^\/api\/payment\/image\/\d+$/) && method === "GET") {
-        const user = await getUser(request, env);
-        if (!user) return jsonResponse({ error: "Unauthorized" }, 401, origin);
-        const orderId = parseInt(path.split("/").pop());
-        const img = await getPaymentImage(env, orderId, user);
-        if (!img) return jsonResponse({ error: "Gambar tidak ditemukan" }, 404, origin);
-        return jsonResponse(img, 200, origin);
-      }
-
-      if (path === "/api/payment/confirm" && method === "POST") {
-        const user = await getUser(request, env);
-        if (!user) return jsonResponse({ error: "Unauthorized" }, 401, origin);
-        return jsonResponse(await confirmPayment(request, env, user), 200, origin);
-      }
-
-      if (path === "/api/seller/pending-payments" && method === "GET") {
-        const user = await getUser(request, env);
-        if (!user) return jsonResponse({ error: "Unauthorized" }, 401, origin);
-        return jsonResponse(await getSellerPendingPayments(env, user), 200, origin);
-      }
-
-      if (path === "/api/seller/bank-accounts") {
-        const user = await getUser(request, env);
-        if (!user) return jsonResponse({ error: "Unauthorized" }, 401, origin);
-        if (method === "GET") return jsonResponse(await getSellerBankAccounts(env, user), 200, origin);
-        if (method === "POST") return jsonResponse(await addBankAccount(request, env, user), 200, origin);
-      }
-
-
       // Health check
-      if (path === "/api/health") {
-        return jsonResponse({ status: "ok", timestamp: new Date().toISOString() }, 200, origin);
+      if (path === "/api/health" || path === "/" || path === "/health") {
+        return jsonResponse({ status: "ok", service: "CWS Mantap API", timestamp: new Date().toISOString() }, 200, origin);
+      }
+
+      // /app-auth — halaman login HTML untuk OAuth-style redirect dari Pages
+      if (path === "/app-auth") {
+        const appId = url.searchParams.get("appId") || "";
+        const redirectUri = url.searchParams.get("redirectUri") || "";
+        const state = url.searchParams.get("state") || "";
+        const type = url.searchParams.get("type") || "signIn";
+
+        // Jika sudah ada session, redirect langsung
+        const user = await getUser(request, env);
+        if (user && redirectUri) {
+          const token = await signToken(
+            { userId: user.id, role: user.role },
+            env.SESSION_SECRET || "default-secret-change-me"
+          );
+          const redirect = new URL(redirectUri);
+          redirect.searchParams.set("token", token);
+          redirect.searchParams.set("state", state);
+          return Response.redirect(redirect.toString(), 302);
+        }
+
+        // Tampilkan halaman login HTML
+        const html = `<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login - CWS Mantap</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f1f5f9; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .card { background: white; border-radius: 16px; padding: 40px; width: 100%; max-width: 400px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+    .logo { text-align: center; margin-bottom: 28px; }
+    .logo h1 { font-size: 28px; font-weight: 800; color: #e11d48; }
+    .logo p { color: #64748b; font-size: 14px; margin-top: 4px; }
+    .tabs { display: flex; gap: 4px; background: #f1f5f9; border-radius: 8px; padding: 4px; margin-bottom: 24px; }
+    .tab { flex: 1; padding: 8px; text-align: center; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; color: #64748b; border: none; background: transparent; }
+    .tab.active { background: white; color: #e11d48; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
+    .form-group { margin-bottom: 16px; }
+    label { display: block; font-size: 13px; font-weight: 500; color: #374151; margin-bottom: 6px; }
+    input { width: 100%; padding: 10px 14px; border: 1.5px solid #e2e8f0; border-radius: 8px; font-size: 14px; outline: none; transition: border-color 0.2s; }
+    input:focus { border-color: #e11d48; }
+    .btn { width: 100%; padding: 12px; background: #e11d48; color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+    .btn:hover { background: #be123c; }
+    .btn:disabled { background: #94a3b8; cursor: not-allowed; }
+    .error { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; display: none; }
+    .success { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; display: none; }
+    #form-register { display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">
+      <h1>CWS Mantap</h1>
+      <p>Platform E-Commerce Terpercaya</p>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('login')">Masuk</button>
+      <button class="tab" onclick="switchTab('register')">Daftar</button>
+    </div>
+
+    <div id="error-msg" class="error"></div>
+    <div id="success-msg" class="success"></div>
+
+    <!-- Form Login -->
+    <div id="form-login">
+      <div class="form-group">
+        <label>Email</label>
+        <input type="email" id="login-email" placeholder="email@contoh.com" />
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="login-password" placeholder="Password" />
+      </div>
+      <button class="btn" id="btn-login" onclick="doLogin()">Masuk</button>
+    </div>
+
+    <!-- Form Register -->
+    <div id="form-register">
+      <div class="form-group">
+        <label>Nama Lengkap</label>
+        <input type="text" id="reg-name" placeholder="Nama kamu" />
+      </div>
+      <div class="form-group">
+        <label>Email</label>
+        <input type="email" id="reg-email" placeholder="email@contoh.com" />
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="reg-password" placeholder="Minimal 6 karakter" />
+      </div>
+      <button class="btn" id="btn-register" onclick="doRegister()">Daftar Sekarang</button>
+    </div>
+  </div>
+
+  <script>
+    const REDIRECT_URI = ${JSON.stringify(redirectUri)};
+    const STATE = ${JSON.stringify(state)};
+    const API = ${JSON.stringify(new URL(request.url).origin)};
+
+    function switchTab(tab) {
+      document.querySelectorAll('.tab').forEach((t, i) => {
+        t.classList.toggle('active', (i === 0 && tab === 'login') || (i === 1 && tab === 'register'));
+      });
+      document.getElementById('form-login').style.display = tab === 'login' ? 'block' : 'none';
+      document.getElementById('form-register').style.display = tab === 'register' ? 'block' : 'none';
+      document.getElementById('error-msg').style.display = 'none';
+    }
+
+    function showError(msg) {
+      const el = document.getElementById('error-msg');
+      el.textContent = msg; el.style.display = 'block';
+      document.getElementById('success-msg').style.display = 'none';
+    }
+
+    function showSuccess(msg) {
+      const el = document.getElementById('success-msg');
+      el.textContent = msg; el.style.display = 'block';
+      document.getElementById('error-msg').style.display = 'none';
+    }
+
+    async function doLogin() {
+      const email = document.getElementById('login-email').value.trim();
+      const password = document.getElementById('login-password').value;
+      if (!email || !password) return showError('Email dan password wajib diisi');
+      const btn = document.getElementById('btn-login');
+      btn.disabled = true; btn.textContent = 'Memproses...';
+      try {
+        const res = await fetch(API + '/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+          credentials: 'include'
+        });
+        const data = await res.json();
+        if (data.error) { showError(data.error); btn.disabled = false; btn.textContent = 'Masuk'; return; }
+        showSuccess('Login berhasil! Mengalihkan...');
+        if (REDIRECT_URI) {
+          const url = new URL(REDIRECT_URI);
+          url.searchParams.set('token', data.token);
+          url.searchParams.set('state', STATE);
+          setTimeout(() => window.location.href = url.toString(), 800);
+        } else {
+          setTimeout(() => window.location.href = '/', 800);
+        }
+      } catch(e) { showError('Gagal terhubung ke server'); btn.disabled = false; btn.textContent = 'Masuk'; }
+    }
+
+    async function doRegister() {
+      const name = document.getElementById('reg-name').value.trim();
+      const email = document.getElementById('reg-email').value.trim();
+      const password = document.getElementById('reg-password').value;
+      if (!name || !email || !password) return showError('Semua field wajib diisi');
+      if (password.length < 6) return showError('Password minimal 6 karakter');
+      const btn = document.getElementById('btn-register');
+      btn.disabled = true; btn.textContent = 'Mendaftar...';
+      try {
+        const res = await fetch(API + '/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, email, password }),
+          credentials: 'include'
+        });
+        const data = await res.json();
+        if (data.error) { showError(data.error); btn.disabled = false; btn.textContent = 'Daftar Sekarang'; return; }
+        showSuccess('Akun berhasil dibuat! Silakan login.');
+        setTimeout(() => switchTab('login'), 1500);
+        btn.disabled = false; btn.textContent = 'Daftar Sekarang';
+      } catch(e) { showError('Gagal terhubung ke server'); btn.disabled = false; btn.textContent = 'Daftar Sekarang'; }
+    }
+
+    // Enter key support
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        const loginVisible = document.getElementById('form-login').style.display !== 'none';
+        if (loginVisible) doLogin(); else doRegister();
+      }
+    });
+  </script>
+</body>
+</html>`;
+
+        return new Response(html, {
+          headers: { "Content-Type": "text/html;charset=UTF-8" },
+        });
       }
 
       return jsonResponse({ error: "Route tidak ditemukan" }, 404, origin);

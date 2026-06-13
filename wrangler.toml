@@ -6,10 +6,14 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "cws-db"
-database_id = "GANTI_DENGAN_ID_DARI_WRANGLER"
+database_id = "d6c03399-56da-4e57-8116-c1364afc9e46"
 
 [vars]
 NODE_ENV = "production"
 
 # Secret variables (set via: wrangler secret put SESSION_SECRET)
 # SESSION_SECRET = "..."
+
+[[kv_namespaces]]
+binding = "PAYMENT_IMAGES"
+id = "9496e6524ccd4dd8b10febb739dc7bcc"
