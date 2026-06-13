@@ -2,19 +2,114 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { trpc } from "@/lib/trpc";
-import Header from "@/components/Header";
-import { Store, ArrowLeft, Plus, Package } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Store, ArrowLeft, Plus, Package, Pencil, Boxes } from "lucide-react";
+import ProductFormDialog, { type SellerProductFull } from "@/components/ProductFormDialog";
+
+const API_URL =
+  import.meta.env.VITE_API_URL || "https://cws-ecommerce-api.nadiracemilan25.workers.dev";
+
+type SellerProfile = {
+  shopName?: string;
+  rating?: number | string;
+  totalRevenue?: number | string;
+} | null;
+
+type SellerOrder = {
+  id: number;
+  status: string;
+  totalAmount: number | string;
+  createdAt: string;
+};
+
+async function fetchSellerProducts(): Promise<SellerProductFull[]> {
+  const res = await fetch(`${API_URL}/api/trpc/sellers.getProducts`, {
+    credentials: "include",
+  });
+  if (!res.ok) return [];
+  const raw = await res.json();
+  const data = raw?.[0]?.result?.data?.json ?? raw ?? [];
+  return Array.isArray(data) ? data : [];
+}
 
 export default function SellerDashboard() {
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, loading: authLoading } = useAuth();
   const [, setLocation] = useLocation();
 
-  const { data: sellerProfile } = trpc.sellers.getProfile.useQuery();
-  const { data: sellerOrders } = trpc.orders.getSellerOrders.useQuery();
-  const { data: sellerProducts } = trpc.sellers.getProducts.useQuery();
+  const [sellerProfile, setSellerProfile] = useState<SellerProfile>(null);
+  const [sellerOrders, setSellerOrders] = useState<SellerOrder[]>([]);
+  const [sellerProducts, setSellerProducts] = useState<SellerProductFull[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  if (!isAuthenticated || user?.role !== "seller") {
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<SellerProductFull | null>(null);
+
+  const canAccess = isAuthenticated && user?.role === "seller";
+
+  const loadProducts = useCallback(async () => {
+    const products = await fetchSellerProducts();
+    setSellerProducts(products);
+  }, []);
+
+  useEffect(() => {
+    if (authLoading) return;
+    if (!canAccess) {
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadData() {
+      setLoading(true);
+      try {
+        const [profileRes, ordersRes, products] = await Promise.all([
+          fetch(`${API_URL}/api/seller/profile`, { credentials: "include" }),
+          fetch(`${API_URL}/api/seller/orders`, { credentials: "include" }),
+          fetchSellerProducts(),
+        ]);
+
+        const profileData = profileRes.ok ? await profileRes.json() : null;
+        const ordersData = ordersRes.ok ? await ordersRes.json() : [];
+
+        if (!cancelled) {
+          setSellerProfile(profileData);
+          setSellerOrders(Array.isArray(ordersData) ? ordersData : []);
+          setSellerProducts(products);
+        }
+      } catch (err) {
+        console.error("[SellerDashboard] Failed to load data", err);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    loadData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, canAccess]);
+
+  const openAddDialog = () => {
+    setEditingProduct(null);
+    setDialogOpen(true);
+  };
+
+  const openEditDialog = (product: SellerProductFull) => {
+    setEditingProduct(product);
+    setDialogOpen(true);
+  };
+
+  if (authLoading || loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <p className="text-slate-600">Memuat...</p>
+      </div>
+    );
+  }
+
+  if (!canAccess) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50">
         <Store className="w-16 h-16 text-slate-300 mb-4" />
@@ -35,17 +130,17 @@ export default function SellerDashboard() {
       <header className="border-b border-slate-200 bg-white sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-4">
-        <Button
-          onClick={() => setLocation("/dashboard")}
-          variant="ghost"
-          className="text-slate-700 hover:bg-slate-100"
-        >
-          <ArrowLeft className="w-5 h-5" />
-        </Button>
+            <Button
+              onClick={() => setLocation("/dashboard")}
+              variant="ghost"
+              className="text-slate-700 hover:bg-slate-100"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </Button>
             <h1 className="text-2xl font-bold text-slate-900">Dashboard Toko</h1>
           </div>
           <Button
-            onClick={() => {}}
+            onClick={openAddDialog}
             className="bg-orange-600 hover:bg-orange-700 text-white flex items-center gap-2"
           >
             <Plus className="w-5 h-5" />
@@ -100,6 +195,72 @@ export default function SellerDashboard() {
           </Card>
         </div>
 
+        {/* Products */}
+        <Card className="p-6 mb-8">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+              <Boxes className="w-5 h-5" />
+              Produk Saya
+            </h3>
+            <Button
+              onClick={openAddDialog}
+              variant="outline"
+              size="sm"
+              className="flex items-center gap-2"
+            >
+              <Plus className="w-4 h-4" />
+              Tambah
+            </Button>
+          </div>
+
+          {sellerProducts && sellerProducts.length > 0 ? (
+            <div className="space-y-3">
+              {sellerProducts.map((p) => (
+                <div
+                  key={p.id}
+                  className="flex items-center justify-between gap-4 p-4 border border-slate-200 rounded-lg hover:bg-slate-50"
+                >
+                  <div className="flex items-center gap-4 min-w-0">
+                    <img
+                      src={p.image || "https://placehold.co/64x64?text=No+Image"}
+                      alt={p.name}
+                      className="w-14 h-14 rounded-md object-cover bg-slate-100 flex-shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <p className="font-semibold text-slate-900 truncate">{p.name}</p>
+                      <p className="text-sm text-slate-600">
+                        Rp {Number(p.price).toLocaleString("id-ID")} · Stok {p.stock}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <span
+                      className={`text-xs font-semibold px-2 py-1 rounded ${
+                        Number(p.isActive) === 0
+                          ? "bg-slate-100 text-slate-500"
+                          : "bg-green-100 text-green-700"
+                      }`}
+                    >
+                      {Number(p.isActive) === 0 ? "Nonaktif" : "Aktif"}
+                    </span>
+                    <Button
+                      onClick={() => openEditDialog(p)}
+                      variant="ghost"
+                      size="sm"
+                      className="flex items-center gap-1"
+                    >
+                      <Pencil className="w-4 h-4" />
+                      Edit
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-slate-600 text-center py-8">Belum ada produk</p>
+          )}
+        </Card>
+
         {/* Recent Orders */}
         <Card className="p-6">
           <h3 className="text-xl font-bold text-slate-900 mb-4 flex items-center gap-2">
@@ -123,13 +284,15 @@ export default function SellerDashboard() {
                     <p className="font-bold text-slate-900">
                       Rp {Number(order.totalAmount).toLocaleString("id-ID")}
                     </p>
-                    <span className={`text-xs font-semibold px-2 py-1 rounded ${
-                      order.status === "delivered"
-                        ? "bg-green-100 text-green-700"
-                        : order.status === "shipped"
-                        ? "bg-blue-100 text-blue-700"
-                        : "bg-yellow-100 text-yellow-700"
-                    }`}>
+                    <span
+                      className={`text-xs font-semibold px-2 py-1 rounded ${
+                        order.status === "delivered"
+                          ? "bg-green-100 text-green-700"
+                          : order.status === "shipped"
+                          ? "bg-blue-100 text-blue-700"
+                          : "bg-yellow-100 text-yellow-700"
+                      }`}
+                    >
                       {order.status}
                     </span>
                   </div>
@@ -141,6 +304,13 @@ export default function SellerDashboard() {
           )}
         </Card>
       </div>
+
+      <ProductFormDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        product={editingProduct}
+        onSaved={loadProducts}
+      />
     </div>
   );
 }
