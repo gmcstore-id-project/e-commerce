@@ -14,13 +14,30 @@ export default function Marketplace() {
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<number | undefined>();
 
-  const { data: products = [], isLoading } = trpc.products.list.useQuery({
-    search: search || undefined,
-    categoryId: selectedCategory,
+  const { data: allProducts = [], isLoading: isLoadingAll } = trpc.products.list.useQuery({
     limit: 20,
+    offset: 0,
   });
 
+  const { data: searchResults = [], isLoading: isLoadingSearch } = trpc.products.search.useQuery(
+    { query: search },
+    { enabled: search.trim().length > 0 }
+  );
+
+  const { data: categoryResults = [], isLoading: isLoadingCategory } = trpc.products.getByCategory.useQuery(
+    { categoryId: selectedCategory! },
+    { enabled: selectedCategory !== undefined }
+  );
+
   const { data: categories = [] } = trpc.categories.list.useQuery();
+
+  const isLoading = isLoadingAll || isLoadingSearch || isLoadingCategory;
+
+  const displayProducts = search.trim()
+    ? searchResults
+    : selectedCategory !== undefined
+    ? categoryResults
+    : allProducts;
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -28,7 +45,7 @@ export default function Marketplace() {
       <div className="bg-white border-b border-slate-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <h1 className="text-3xl font-bold text-slate-900 mb-6">Marketplace</h1>
-          
+
           {/* Search Bar */}
           <div className="flex gap-4 mb-6">
             <div className="flex-1 relative">
@@ -77,7 +94,7 @@ export default function Marketplace() {
               <Card key={i} className="h-64 bg-slate-200 animate-pulse" />
             ))}
           </div>
-        ) : products.length === 0 ? (
+        ) : displayProducts.length === 0 ? (
           <div className="text-center py-12">
             <p className="text-slate-600 mb-4">Tidak ada produk ditemukan</p>
             {!isAuthenticated && (
@@ -88,7 +105,7 @@ export default function Marketplace() {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-            {products.map((product: any) => (
+            {displayProducts.map((product: any) => (
               <Card
                 key={product.id}
                 className="overflow-hidden hover:shadow-lg transition-shadow cursor-pointer"
