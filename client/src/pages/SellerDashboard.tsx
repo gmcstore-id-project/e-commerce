@@ -2,10 +2,6 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-<<<<<<< HEAD
-import { useEffect, useState } from "react";
-import { Store, ArrowLeft, Plus, Package } from "lucide-react";
-=======
 import { useCallback, useEffect, useState } from "react";
 import { Store, ArrowLeft, Plus, Package, Pencil, Boxes } from "lucide-react";
 import ProductFormDialog, { type SellerProductFull } from "@/components/ProductFormDialog";
@@ -35,28 +31,6 @@ async function fetchSellerProducts(): Promise<SellerProductFull[]> {
   const data = raw?.[0]?.result?.data?.json ?? raw ?? [];
   return Array.isArray(data) ? data : [];
 }
->>>>>>> 03a0463 (update auth pages and source files)
-
-const API_URL =
-  import.meta.env.VITE_API_URL || "https://cws-ecommerce-api.nadiracemilan25.workers.dev";
-
-type SellerProfile = {
-  shopName?: string;
-  rating?: number | string;
-  totalRevenue?: number | string;
-} | null;
-
-type SellerOrder = {
-  id: number;
-  status: string;
-  totalAmount: number | string;
-  createdAt: string;
-};
-
-type SellerProduct = {
-  id: number;
-  name: string;
-};
 
 export default function SellerDashboard() {
   const { user, isAuthenticated, loading: authLoading } = useAuth();
@@ -64,68 +38,8 @@ export default function SellerDashboard() {
 
   const [sellerProfile, setSellerProfile] = useState<SellerProfile>(null);
   const [sellerOrders, setSellerOrders] = useState<SellerOrder[]>([]);
-<<<<<<< HEAD
-  const [sellerProducts, setSellerProducts] = useState<SellerProduct[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    if (authLoading) return;
-    if (!isAuthenticated || user?.role !== "seller") {
-      setLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-
-    async function loadData() {
-      setLoading(true);
-      try {
-        const [profileRes, ordersRes, productsRes] = await Promise.all([
-          fetch(`${API_URL}/api/seller/profile`, { credentials: "include" }),
-          fetch(`${API_URL}/api/seller/orders`, { credentials: "include" }),
-          fetch(`${API_URL}/api/trpc/sellers.getProducts`, { credentials: "include" }),
-        ]);
-
-        const profileData = profileRes.ok ? await profileRes.json() : null;
-        const ordersData = ordersRes.ok ? await ordersRes.json() : [];
-
-        let productsData: SellerProduct[] = [];
-        if (productsRes.ok) {
-          const raw = await productsRes.json();
-          // tRPC-style response: [{ result: { data: { json: [...] } } }]
-          productsData = raw?.[0]?.result?.data?.json ?? raw ?? [];
-        }
-
-        if (!cancelled) {
-          setSellerProfile(profileData);
-          setSellerOrders(Array.isArray(ordersData) ? ordersData : []);
-          setSellerProducts(Array.isArray(productsData) ? productsData : []);
-        }
-      } catch (err) {
-        console.error("[SellerDashboard] Failed to load data", err);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-
-    loadData();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [authLoading, isAuthenticated, user]);
-
-  if (authLoading || loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <p className="text-slate-600">Memuat...</p>
-      </div>
-    );
-  }
-=======
   const [sellerProducts, setSellerProducts] = useState<SellerProductFull[]>([]);
   const [loading, setLoading] = useState(true);
->>>>>>> 03a0463 (update auth pages and source files)
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<SellerProductFull | null>(null);
