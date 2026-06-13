@@ -2,9 +2,8 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { useCallback, useEffect, useState } from "react";
-import { Store, ArrowLeft, Plus, Package, Pencil, Boxes } from "lucide-react";
-import ProductFormDialog, { type SellerProductFull } from "@/components/ProductFormDialog";
+import { useEffect, useState } from "react";
+import { Store, ArrowLeft, Plus, Package } from "lucide-react";
 
 const API_URL =
   import.meta.env.VITE_API_URL || "https://cws-ecommerce-api.nadiracemilan25.workers.dev";
@@ -22,15 +21,10 @@ type SellerOrder = {
   createdAt: string;
 };
 
-async function fetchSellerProducts(): Promise<SellerProductFull[]> {
-  const res = await fetch(`${API_URL}/api/trpc/sellers.getProducts`, {
-    credentials: "include",
-  });
-  if (!res.ok) return [];
-  const raw = await res.json();
-  const data = raw?.[0]?.result?.data?.json ?? raw ?? [];
-  return Array.isArray(data) ? data : [];
-}
+type SellerProduct = {
+  id: number;
+  name: string;
+};
 
 export default function SellerDashboard() {
   const { user, isAuthenticated, loading: authLoading } = useAuth();
@@ -38,22 +32,12 @@ export default function SellerDashboard() {
 
   const [sellerProfile, setSellerProfile] = useState<SellerProfile>(null);
   const [sellerOrders, setSellerOrders] = useState<SellerOrder[]>([]);
-  const [sellerProducts, setSellerProducts] = useState<SellerProductFull[]>([]);
+  const [sellerProducts, setSellerProducts] = useState<SellerProduct[]>([]);
   const [loading, setLoading] = useState(true);
-
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingProduct, setEditingProduct] = useState<SellerProductFull | null>(null);
-
-  const canAccess = isAuthenticated && user?.role === "seller";
-
-  const loadProducts = useCallback(async () => {
-    const products = await fetchSellerProducts();
-    setSellerProducts(products);
-  }, []);
 
   useEffect(() => {
     if (authLoading) return;
-    if (!canAccess) {
+    if (!isAuthenticated || user?.role !== "seller") {
       setLoading(false);
       return;
     }
@@ -63,19 +47,26 @@ export default function SellerDashboard() {
     async function loadData() {
       setLoading(true);
       try {
-        const [profileRes, ordersRes, products] = await Promise.all([
+        const [profileRes, ordersRes, productsRes] = await Promise.all([
           fetch(`${API_URL}/api/seller/profile`, { credentials: "include" }),
           fetch(`${API_URL}/api/seller/orders`, { credentials: "include" }),
-          fetchSellerProducts(),
+          fetch(`${API_URL}/api/trpc/sellers.getProducts`, { credentials: "include" }),
         ]);
 
         const profileData = profileRes.ok ? await profileRes.json() : null;
         const ordersData = ordersRes.ok ? await ordersRes.json() : [];
 
+        let productsData: SellerProduct[] = [];
+        if (productsRes.ok) {
+          const raw = await productsRes.json();
+          // tRPC-style response: [{ result: { data: { json: [...] } } }]
+          productsData = raw?.[0]?.result?.data?.json ?? raw ?? [];
+        }
+
         if (!cancelled) {
           setSellerProfile(profileData);
           setSellerOrders(Array.isArray(ordersData) ? ordersData : []);
-          setSellerProducts(products);
+          setSellerProducts(Array.isArray(productsData) ? productsData : []);
         }
       } catch (err) {
         console.error("[SellerDashboard] Failed to load data", err);
@@ -89,17 +80,7 @@ export default function SellerDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [authLoading, canAccess]);
-
-  const openAddDialog = () => {
-    setEditingProduct(null);
-    setDialogOpen(true);
-  };
-
-  const openEditDialog = (product: SellerProductFull) => {
-    setEditingProduct(product);
-    setDialogOpen(true);
-  };
+  }, [authLoading, isAuthenticated, user]);
 
   if (authLoading || loading) {
     return (
@@ -109,7 +90,7 @@ export default function SellerDashboard() {
     );
   }
 
-  if (!canAccess) {
+  if (!isAuthenticated || user?.role !== "seller") {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50">
         <Store className="w-16 h-16 text-slate-300 mb-4" />
@@ -140,7 +121,7 @@ export default function SellerDashboard() {
             <h1 className="text-2xl font-bold text-slate-900">Dashboard Toko</h1>
           </div>
           <Button
-            onClick={openAddDialog}
+            onClick={() => {}}
             className="bg-orange-600 hover:bg-orange-700 text-white flex items-center gap-2"
           >
             <Plus className="w-5 h-5" />
@@ -195,72 +176,6 @@ export default function SellerDashboard() {
           </Card>
         </div>
 
-        {/* Products */}
-        <Card className="p-6 mb-8">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-              <Boxes className="w-5 h-5" />
-              Produk Saya
-            </h3>
-            <Button
-              onClick={openAddDialog}
-              variant="outline"
-              size="sm"
-              className="flex items-center gap-2"
-            >
-              <Plus className="w-4 h-4" />
-              Tambah
-            </Button>
-          </div>
-
-          {sellerProducts && sellerProducts.length > 0 ? (
-            <div className="space-y-3">
-              {sellerProducts.map((p) => (
-                <div
-                  key={p.id}
-                  className="flex items-center justify-between gap-4 p-4 border border-slate-200 rounded-lg hover:bg-slate-50"
-                >
-                  <div className="flex items-center gap-4 min-w-0">
-                    <img
-                      src={p.image || "https://placehold.co/64x64?text=No+Image"}
-                      alt={p.name}
-                      className="w-14 h-14 rounded-md object-cover bg-slate-100 flex-shrink-0"
-                    />
-                    <div className="min-w-0">
-                      <p className="font-semibold text-slate-900 truncate">{p.name}</p>
-                      <p className="text-sm text-slate-600">
-                        Rp {Number(p.price).toLocaleString("id-ID")} · Stok {p.stock}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    <span
-                      className={`text-xs font-semibold px-2 py-1 rounded ${
-                        Number(p.isActive) === 0
-                          ? "bg-slate-100 text-slate-500"
-                          : "bg-green-100 text-green-700"
-                      }`}
-                    >
-                      {Number(p.isActive) === 0 ? "Nonaktif" : "Aktif"}
-                    </span>
-                    <Button
-                      onClick={() => openEditDialog(p)}
-                      variant="ghost"
-                      size="sm"
-                      className="flex items-center gap-1"
-                    >
-                      <Pencil className="w-4 h-4" />
-                      Edit
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-slate-600 text-center py-8">Belum ada produk</p>
-          )}
-        </Card>
-
         {/* Recent Orders */}
         <Card className="p-6">
           <h3 className="text-xl font-bold text-slate-900 mb-4 flex items-center gap-2">
@@ -304,13 +219,6 @@ export default function SellerDashboard() {
           )}
         </Card>
       </div>
-
-      <ProductFormDialog
-        open={dialogOpen}
-        onOpenChange={setDialogOpen}
-        product={editingProduct}
-        onSaved={loadProducts}
-      />
     </div>
   );
 }
