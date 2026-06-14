@@ -1,7 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { useLocation } from "wouter";
-import { ShoppingCart, Menu, X } from "lucide-react";
+import { ShoppingCart, Menu, X, Search } from "lucide-react";
 import { useState } from "react";
 
 export default function Header() {
@@ -16,18 +16,30 @@ export default function Header() {
 
   return (
     <header className="border-b border-slate-200 bg-white sticky top-0 z-50">
-      <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+      <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3">
         {/* Logo & Brand */}
         <div
-          className="flex items-center gap-2 cursor-pointer"
+          className="flex items-center gap-2 cursor-pointer flex-shrink-0"
           onClick={() => setLocation("/")}
         >
-          <img src="/logo.png" alt="CWS Mantap" className="w-12 h-12 object-contain" />
-          <h1 className="text-2xl font-bold text-slate-900">CWS Mantap</h1>
+          <img src="/logo.png" alt="CWS Mantap" className="w-10 h-10 object-contain" />
+          <h1 className="text-xl font-bold text-slate-900 hidden sm:block">CWS Mantap</h1>
+        </div>
+
+        {/* Search Bar - center, grows */}
+        <div className="flex-1 max-w-xl">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Cari produk..."
+              className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-full text-sm bg-slate-50 focus:outline-none focus:ring-2 focus:ring-orange-300 focus:border-transparent"
+            />
+          </div>
         </div>
 
         {/* Desktop Navigation */}
-        <div className="hidden md:flex items-center gap-4">
+        <div className="hidden md:flex items-center gap-2 flex-shrink-0">
           {isAuthenticated ? (
             <>
               <Button
@@ -88,7 +100,7 @@ export default function Header() {
 
         {/* Mobile Menu Button */}
         <button
-          className="md:hidden"
+          className="md:hidden flex-shrink-0"
           onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
         >
           {mobileMenuOpen ? (
